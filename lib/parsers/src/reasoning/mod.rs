@@ -168,12 +168,17 @@ impl ReasoningParserType {
                 )),
             },
             ReasoningParserType::KimiK25 => ReasoningParserWrapper {
-                parser: Box::new(BasicReasoningParser::new(
-                    "<think>".into(),
-                    "</think>".into(),
-                    true,
-                    true,
-                )),
+                // Matches SGLang's KimiK2Detector: force_reasoning=false by
+                // default, and `<|tool_calls_section_begin|>` is recognized
+                // as an early reasoning terminator so the model can transition
+                // from thinking directly into a tool-call section without
+                // emitting </think>. Callers drive into-reasoning state per
+                // request via set_in_reasoning when the chat template has
+                // already injected <think>.
+                parser: Box::new(
+                    BasicReasoningParser::new("<think>".into(), "</think>".into(), false, true)
+                        .with_tool_start_token("<|tool_calls_section_begin|>".into()),
+                ),
             },
             ReasoningParserType::Mistral => ReasoningParserWrapper {
                 parser: Box::new(BasicReasoningParser::new(
@@ -264,10 +269,14 @@ mod tests {
         // (description, input, expected_reasoning, expected_normal)
         let cases = [
             (
-                "force reasoning: no think tags",
-                "no think tags here",
+                // force_reasoning=false (matches SGLang default). Without a
+                // <think> tag the text flows through as normal content.
+                // Callers use set_in_reasoning(true) to opt-in per request
+                // when the chat template injected <think> into the prompt.
+                "no think tags: plain content",
                 "no think tags here",
                 "",
+                "no think tags here",
             ),
             (
                 "standard think tags",
@@ -286,6 +295,16 @@ mod tests {
                 "<think>\n</think>Hello from instant mode!",
                 "",
                 "Hello from instant mode!",
+            ),
+            (
+                // Kimi K2.5 can go straight from reasoning into a tool-call
+                // section without emitting </think>. The tool-section marker
+                // terminates reasoning and flows to normal_text so the
+                // tool-call parser sees it.
+                "reasoning terminated by tool-call section marker",
+                "<think>decide to call tool<|tool_calls_section_begin|><|tool_call_begin|>functions.foo:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>",
+                "decide to call tool",
+                "<|tool_calls_section_begin|><|tool_call_begin|>functions.foo:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>",
             ),
         ];
 

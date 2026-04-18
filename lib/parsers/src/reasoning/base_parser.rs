@@ -57,6 +57,13 @@ fn overlap(s: &str, delim: &str) -> usize {
 pub struct BasicReasoningParser {
     think_start_token: String,
     think_end_token: String,
+    // Optional early-terminator for reasoning. When the parser is in reasoning
+    // mode and encounters this token, reasoning ends and the token itself is
+    // emitted as normal text so a downstream tool-call parser can pick it up.
+    // Used by Kimi K2.5, which can transition directly from reasoning into a
+    // tool-call section via `<|tool_calls_section_begin|>` without emitting
+    // `</think>` first.
+    tool_start_token: Option<String>,
     _in_reasoning: bool,
     stream_reasoning: bool,
     _buffer: String,
@@ -73,11 +80,17 @@ impl BasicReasoningParser {
         Self {
             think_start_token,
             think_end_token,
+            tool_start_token: None,
             _in_reasoning: force_reasoning,
             stream_reasoning,
             _buffer: String::new(),
             stripped_think_start: false,
         }
+    }
+
+    pub fn with_tool_start_token(mut self, token: String) -> Self {
+        self.tool_start_token = Some(token);
+        self
     }
 }
 
@@ -101,8 +114,19 @@ impl ReasoningParser for BasicReasoningParser {
             };
         }
 
-        // If force_reasoning and no start tag, treat entire text as reasoning
+        // If force_reasoning and no start tag, treat entire text as reasoning —
+        // unless a configured tool_start_token appears before any </think>, in
+        // which case reasoning ends at the tool marker and the marker + rest
+        // flow to normal_text for the tool-call parser.
         if self._in_reasoning && !has_think_tag && !text.contains(&self.think_end_token) {
+            if let Some(ref tool_tok) = self.tool_start_token
+                && let Some(pos) = text.find(tool_tok.as_str())
+            {
+                return ParserResult {
+                    reasoning_text: text[..pos].trim().to_string(),
+                    normal_text: text[pos..].to_string(),
+                };
+            }
             return ParserResult {
                 normal_text: String::new(),
                 reasoning_text: text.to_string(),
@@ -121,15 +145,39 @@ impl ReasoningParser for BasicReasoningParser {
                 if text[cursor..].starts_with(&self.think_start_token) {
                     cursor += self.think_start_token.len();
                 }
-                // We're inside a reasoning block — look for end token
-                if let Some(end_offset) = text[cursor..].find(&self.think_end_token) {
-                    reasoning_parts.push(&text[cursor..cursor + end_offset]);
-                    cursor += end_offset + self.think_end_token.len();
-                    currently_reasoning = false;
-                } else {
-                    // No end token — rest is reasoning (truncated)
-                    reasoning_parts.push(&text[cursor..]);
-                    cursor = text.len();
+                // We're inside a reasoning block — look for end token OR the
+                // tool_start_token (Kimi K2.5 may transition directly into a
+                // tool-call section). Pick whichever occurs first.
+                let end_pos = text[cursor..].find(&self.think_end_token);
+                let tool_pos = self
+                    .tool_start_token
+                    .as_ref()
+                    .and_then(|tok| text[cursor..].find(tok.as_str()));
+                match (end_pos, tool_pos) {
+                    (Some(e), Some(t)) if t < e => {
+                        reasoning_parts.push(&text[cursor..cursor + t]);
+                        cursor += t;
+                        normal_parts.push(&text[cursor..]);
+                        cursor = text.len();
+                        currently_reasoning = false;
+                    }
+                    (Some(e), _) => {
+                        reasoning_parts.push(&text[cursor..cursor + e]);
+                        cursor += e + self.think_end_token.len();
+                        currently_reasoning = false;
+                    }
+                    (None, Some(t)) => {
+                        reasoning_parts.push(&text[cursor..cursor + t]);
+                        cursor += t;
+                        normal_parts.push(&text[cursor..]);
+                        cursor = text.len();
+                        currently_reasoning = false;
+                    }
+                    (None, None) => {
+                        // No terminator — rest is reasoning (truncated)
+                        reasoning_parts.push(&text[cursor..]);
+                        cursor = text.len();
+                    }
                 }
             } else {
                 // We're in normal text — look for start token
@@ -200,7 +248,33 @@ impl ReasoningParser for BasicReasoningParser {
             }
 
             if self._in_reasoning {
-                if let Some(end_idx) = current_text.find(self.think_end_token.as_str()) {
+                let end_idx = current_text.find(self.think_end_token.as_str());
+                let tool_idx = self
+                    .tool_start_token
+                    .as_ref()
+                    .and_then(|tok| current_text.find(tok.as_str()));
+
+                // If the tool-call section begins before </think> (or </think>
+                // never appears in this buffer), terminate reasoning at the
+                // tool marker and push the marker + remainder to normal_text
+                // (Kimi K2.5). Unlike </think>, the marker itself is NOT
+                // consumed — the downstream tool-call parser needs to see it.
+                let transition_at_tool = match (end_idx, tool_idx) {
+                    (Some(e), Some(t)) => t < e,
+                    (None, Some(_)) => true,
+                    _ => false,
+                };
+
+                if transition_at_tool {
+                    let t = tool_idx.expect("tool_idx set when transitioning");
+                    accumulated_reasoning.push_str(&current_text[..t]);
+                    self._buffer = current_text[t..].to_string();
+                    self._in_reasoning = false;
+                    self.stripped_think_start = false;
+                    continue; // Process remainder as normal text
+                }
+
+                if let Some(end_idx) = end_idx {
                     // End of reasoning block: accumulate content and transition out.
                     accumulated_reasoning.push_str(&current_text[..end_idx]);
                     let after_end = end_idx + self.think_end_token.len();
@@ -209,10 +283,18 @@ impl ReasoningParser for BasicReasoningParser {
                     self.stripped_think_start = false; // Allow detecting next <think> block
                     continue; // Process remainder — may contain further blocks
                 } else {
-                    // No complete end token — check for partial at end of buffer
-                    // (e.g., "reasoning content</th" where "</th" is a prefix of "</think>").
+                    // No complete end token — check for partial of either
+                    // </think> or tool_start_token at end of buffer (e.g.,
+                    // "reasoning</th" or "reasoning<|tool_calls_sec" on the
+                    // chunk boundary). Hold back the longer of the two.
                     if self.stream_reasoning {
-                        let ol = overlap(&current_text, &self.think_end_token);
+                        let ol_end = overlap(&current_text, &self.think_end_token);
+                        let ol_tool = self
+                            .tool_start_token
+                            .as_ref()
+                            .map(|tok| overlap(&current_text, tok))
+                            .unwrap_or(0);
+                        let ol = ol_end.max(ol_tool);
                         if ol >= 2 {
                             let safe_end = current_text.len() - ol;
                             if safe_end > 0 {
@@ -997,6 +1079,79 @@ mod tests {
         let r2 = parser.parse_reasoning_streaming_incremental("nk>thought2</think>answer2", &[]);
         assert_eq!(r2.reasoning_text, "thought2");
         assert_eq!(r2.normal_text, "answer2");
+    }
+
+    #[test]
+    fn test_tool_start_token_terminates_reasoning_streaming() {
+        // Kimi K2.5: model transitions from reasoning directly into a
+        // tool-call section without emitting </think>. The configured
+        // tool_start_token terminates reasoning and is pushed to normal_text
+        // (NOT consumed) so the downstream tool-call parser detects it.
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true)
+                .with_tool_start_token("<|tool_calls_section_begin|>".to_string());
+
+        let r1 =
+            parser.parse_reasoning_streaming_incremental("<think>let me decide which tool", &[]);
+        assert_eq!(r1.reasoning_text, "let me decide which tool");
+        assert_eq!(r1.normal_text, "");
+
+        // Tool-section marker arrives mid-stream — reasoning ends, marker flows
+        // through as normal text.
+        let r2 = parser.parse_reasoning_streaming_incremental(
+            "<|tool_calls_section_begin|><|tool_call_begin|>functions.foo:0",
+            &[],
+        );
+        assert_eq!(r2.reasoning_text, "");
+        assert_eq!(
+            r2.normal_text,
+            "<|tool_calls_section_begin|><|tool_call_begin|>functions.foo:0"
+        );
+
+        // Remainder keeps flowing as normal text.
+        let r3 = parser.parse_reasoning_streaming_incremental(
+            "<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>",
+            &[],
+        );
+        assert_eq!(r3.reasoning_text, "");
+        assert_eq!(
+            r3.normal_text,
+            "<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>"
+        );
+    }
+
+    #[test]
+    fn test_tool_start_token_partial_across_chunks() {
+        // Partial tool_start_token split across chunks while in reasoning.
+        // The overlap check must hold back the partial so the reasoning
+        // parser doesn't emit "<|tool_ca" as reasoning text.
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true)
+                .with_tool_start_token("<|tool_calls_section_begin|>".to_string());
+
+        parser.set_in_reasoning(true);
+
+        let r1 = parser.parse_reasoning_streaming_incremental("thinking<|tool_ca", &[]);
+        assert_eq!(r1.reasoning_text, "thinking");
+        assert_eq!(r1.normal_text, "");
+
+        let r2 = parser.parse_reasoning_streaming_incremental("lls_section_begin|>payload", &[]);
+        assert_eq!(r2.reasoning_text, "");
+        assert_eq!(r2.normal_text, "<|tool_calls_section_begin|>payload");
+    }
+
+    #[test]
+    fn test_tool_start_token_not_triggered_outside_reasoning() {
+        // When the parser is not in reasoning mode, the tool_start_token has
+        // no special meaning — it just flows through as normal text.
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true)
+                .with_tool_start_token("<|tool_calls_section_begin|>".to_string());
+
+        let r = parser
+            .parse_reasoning_streaming_incremental("<|tool_calls_section_begin|>direct call", &[]);
+        assert_eq!(r.reasoning_text, "");
+        assert_eq!(r.normal_text, "<|tool_calls_section_begin|>direct call");
     }
 
     #[test]
