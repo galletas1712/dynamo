@@ -343,13 +343,34 @@ class VllmProcessor:
                     engine_response = dynamo_response
 
                 if engine_response is None or "token_ids" not in engine_response:
-                    logger.error("No outputs from engine for request %s", request_id)
-                    yield {
-                        "error": {
-                            "message": f"Invalid engine response for request {request_id}",
-                            "type": "internal_error",
+                    if (
+                        isinstance(engine_response, dict)
+                        and engine_response.get("status") == "error"
+                    ):
+                        backend_msg = engine_response.get(
+                            "message", "unknown backend error"
+                        )
+                        logger.error(
+                            "Backend error for request %s: %s", request_id, backend_msg
+                        )
+                        yield {
+                            "error": {
+                                "message": backend_msg,
+                                "type": "backend_error",
+                            }
                         }
-                    }
+                    else:
+                        logger.error(
+                            "No outputs from engine for request %s: %s",
+                            request_id,
+                            engine_response,
+                        )
+                        yield {
+                            "error": {
+                                "message": f"Invalid engine response for request {request_id}",
+                                "type": "internal_error",
+                            }
+                        }
                     break
 
                 raw_finish_reason = engine_response.get("finish_reason")
@@ -390,6 +411,19 @@ class VllmProcessor:
                         dynamo_out["usage"] = usage
 
                     yield dynamo_out
+        except Exception as e:
+            logger.error(
+                "Error generating response for request %s: %s",
+                request_id,
+                e,
+                exc_info=True,
+            )
+            yield {
+                "error": {
+                    "message": str(e),
+                    "type": "internal_error",
+                }
+            }
         finally:
             if vllm_preproc.request_id in self.output_processor.request_states:
                 self.output_processor.abort_requests(

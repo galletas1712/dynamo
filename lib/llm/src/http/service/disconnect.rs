@@ -221,7 +221,16 @@ pub fn monitor_for_disconnects(
                         Some(Err(err)) => {
                             // Mark error as internal since it's a streaming error
                             inflight_guard.mark_error(ErrorType::Internal);
-                            yield Event::default().event("error").comment(err.to_string());
+                            // Axum's Event::comment() panics on \n / \r; flatten
+                            // multi-line backend errors (e.g. Python tracebacks) to
+                            // a single SSE comment line.
+                            let sanitized = err.to_string().replace('\n', " ").replace('\r', "");
+                            let sanitized = if sanitized.trim().is_empty() {
+                                "unspecified error".to_string()
+                            } else {
+                                sanitized
+                            };
+                            yield Event::default().event("error").comment(sanitized);
                             // Break to prevent any subsequent mark_ok() from overwriting the error
                             break;
                         }
