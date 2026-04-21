@@ -47,6 +47,7 @@ from dynamo.llm import (
     unregister_model,
 )
 from dynamo.llm.exceptions import EngineShutdown
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -118,7 +119,8 @@ class LoRAInfo:
 
 
 def _compute_mm_uuids(
-    multi_modal_data: Dict[str, Any] | None
+    multi_modal_data: Dict[str, Any] | None,
+    request_id: str | None = None,
 ) -> Dict[str, list[str]] | None:
     """
     Compute multi_modal_uuids from multi_modal_data.
@@ -138,7 +140,16 @@ def _compute_mm_uuids(
         images = [images]
     if not images:
         return None
-    uuids = compute_mm_uuids_from_images(images)
+    _t0 = time.perf_counter()
+    with _nvtx.annotate("mm:dynamo:uuid_compute", color="orange"):
+        uuids = compute_mm_uuids_from_images(images)
+    logger.info(
+        "[dynamo:uuid] req=%s type=%s n=%d total_ms=%.1f",
+        request_id,
+        type(images[0]).__name__,
+        len(images),
+        (time.perf_counter() - _t0) * 1000.0,
+    )
     return {"image": uuids}
 
 
@@ -1380,7 +1391,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     },
                 )
         # Normal path: use token IDs
-        mm_uuids = _compute_mm_uuids(multi_modal_data)
+        mm_uuids = _compute_mm_uuids(multi_modal_data, request_id=request_id)
         prompt_kwargs = dict[str, Any](
             prompt_token_ids=request["token_ids"],
             multi_modal_data=multi_modal_data,

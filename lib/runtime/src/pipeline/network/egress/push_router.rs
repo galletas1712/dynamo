@@ -7,7 +7,6 @@ use crate::{
     component::{
         Client, DeviceType, Endpoint, RoutingOccupancyState, get_or_create_routing_occupancy_state,
     },
-    dynamo_nvtx_range,
     engine::{AsyncEngine, AsyncEngineContext, Data},
     metrics::frontend_perf::STAGE_DURATION_SECONDS,
     pipeline::{
@@ -774,7 +773,9 @@ where
             .with_label_values(&["route"])
             .observe(route_start.elapsed().as_secs_f64());
 
-        let _nvtx_transport = dynamo_nvtx_range!(_transport_kind);
+        // NVTX dropped: this range wrapped `.generate(request).await` which
+        // spans an await across the full send+stream. Per-stage timing is
+        // already emitted inside AddressedPushRouter via tracing log lines.
         let stream: anyhow::Result<ManyOut<U>> = self
             .addressed
             .generate(request)

@@ -252,21 +252,34 @@ where
         headers.insert("x-frontend-send-ts-ns".to_string(), send_ts_ns.to_string());
 
         // Phase A: Frontend → Backend (network + queue + ack)
-        let _nvtx_send = dynamo_nvtx_range!("transport.tcp.send");
+        // NVTX dropped: `transport.tcp.send` and `transport.tcp.wait_backend`
+        // both wrapped `.await?`. Replaced with Instant + tracing per-request.
+        let send_start = Instant::now();
         let _response = self
             .req_client
             .send_request(address, buffer, headers)
             .await?;
-        drop(_nvtx_send);
+        let send_elapsed_us = send_start.elapsed().as_micros() as u64;
         REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
+        tracing::info!(
+            request_id = %request_id,
+            stage = "transport.tcp.send",
+            elapsed_us = send_elapsed_us,
+            "[frontend]"
+        );
 
-        let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
+        let wait_start = Instant::now();
         tracing::trace!(request_id, "awaiting transport handshake");
         let response_stream = response_stream_provider
             .await
             .map_err(|_| PipelineError::DetachedStreamReceiver)?
             .map_err(PipelineError::ConnectionFailed)?;
-        drop(_nvtx_wait);
+        tracing::info!(
+            request_id = %request_id,
+            stage = "transport.tcp.wait_backend",
+            elapsed_us = wait_start.elapsed().as_micros() as u64,
+            "[frontend]"
+        );
 
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)
         let mut is_complete_final = false;

@@ -102,16 +102,24 @@ class ServerManager:
         pid = self._process.pid
         print(f"Stopping server (PID {pid})...", flush=True)
 
+        # SIGINT to the top-level process only (not the whole process group):
+        # - nsys 2026.2.1 ignores SIGTERM; SIGINT triggers its graceful
+        #   stop-and-finalize path (produces a proper .nsys-rep).
+        # - killpg(SIGINT) also signals every vLLM worker simultaneously,
+        #   which crashes them abruptly before nsys can finalize. Sending
+        #   SIGINT to only the root (nsys, via exec) lets nsys tear down
+        #   its children cleanly.
         try:
-            os.killpg(pid, signal.SIGTERM)
+            self._process.send_signal(signal.SIGINT)
         except (ProcessLookupError, PermissionError):
-            try:
-                self._process.terminate()
-            except (ProcessLookupError, PermissionError):
-                pass
+            pass
 
+        # Wait long enough for nsys to kill vllm, finalize its .nsys-rep, and
+        # exit. Finalize can take 60-90s for large traces; tolerate up to 180s
+        # before escalating to SIGKILL, else we lose the trace (nsys only emits
+        # .nsys-rep on graceful exit, not SIGKILL).
         try:
-            self._process.wait(timeout=15)
+            self._process.wait(timeout=180)
         except subprocess.TimeoutExpired:
             try:
                 os.killpg(pid, signal.SIGKILL)

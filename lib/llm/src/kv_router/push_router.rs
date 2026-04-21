@@ -6,7 +6,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
 use dynamo_runtime::{
-    dynamo_nvtx_range,
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
         SingleIn, async_trait,
@@ -15,6 +14,7 @@ use dynamo_runtime::{
 };
 use futures::stream::{self, StreamExt};
 use serde_json::json;
+use std::time::Instant;
 use tracing::Instrument;
 
 use crate::{
@@ -300,7 +300,12 @@ impl KvPushRouter {
         phase: RequestPhase,
         is_query_only: bool,
     ) -> Result<WorkerSelection, Error> {
-        let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
+        // NVTX dropped: `route.select_worker` and `route.kv_match` both
+        // wrapped `.await?` — PushPop ranges that span awaits produce
+        // unreliable nesting under concurrent routing. Per-request timing
+        // is emitted via `tracing::info!` below using `context_id`. The
+        // outer `route.select_worker` timer lives in the caller
+        // (generate) so it captures the full `.await?` wall time.
         let routing = request.routing.as_ref();
         let lora_name = routing.and_then(|r| r.lora_name.clone());
         let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
@@ -308,7 +313,7 @@ impl KvPushRouter {
         let allowed_worker_ids = routing.and_then(|r| r.allowed_worker_ids.clone());
         let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
         let Some((pinned_worker_id, requested_dp_rank)) = pinned_worker_hint(phase, routing) else {
-            let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
+            let kv_match_start = Instant::now();
             let (best_worker, overlap_amount) = self
                 .chooser
                 .find_best_match(
@@ -324,6 +329,12 @@ impl KvPushRouter {
                     allowed_worker_ids,
                 )
                 .await?;
+            tracing::info!(
+                context_id,
+                stage = "route.kv_match",
+                elapsed_us = kv_match_start.elapsed().as_micros() as u64,
+                "[frontend]"
+            );
 
             if !is_query_only {
                 let total_blocks = routing_token_ids
@@ -505,10 +516,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .unwrap_or(RequestPhase::Aggregated);
 
         let block_size = self.chooser.block_size() as usize;
+        let select_worker_start = Instant::now();
         let selection = self
             .select_worker(&context_id, &request, phase, is_query_only)
             .instrument(tracing::info_span!("kv_router.select_worker"))
             .await?;
+        tracing::info!(
+            context_id = %context_id,
+            stage = "route.select_worker",
+            elapsed_us = select_worker_start.elapsed().as_micros() as u64,
+            "[frontend]"
+        );
         let WorkerSelection {
             instance_id,
             backend_dp_rank,

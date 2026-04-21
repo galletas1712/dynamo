@@ -5,8 +5,27 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
+
+/// RAII timer that logs the chat-completions handler wall time on drop.
+/// Fires on every return path (success and error) so we can correlate
+/// request_id with frontend-side total latency post-hoc.
+struct FrontendHandlerTimer {
+    request_id: String,
+    start: Instant,
+}
+
+impl Drop for FrontendHandlerTimer {
+    fn drop(&mut self) {
+        tracing::info!(
+            request_id = %self.request_id,
+            stage = "frontend.chat_completions",
+            elapsed_us = self.start.elapsed().as_micros() as u64,
+            "[frontend]"
+        );
+    }
+}
 
 use axum::{
     Json, Router,
@@ -1154,6 +1173,10 @@ async fn chat_completions(
     check_ready(&state)?;
 
     let request_id = request.id().to_string();
+    let _frontend_timer = FrontendHandlerTimer {
+        request_id: request_id.clone(),
+        start: Instant::now(),
+    };
 
     // Determine streaming mode early
     // todo - decide on default

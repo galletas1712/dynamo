@@ -7,6 +7,8 @@ from typing import Any, Sequence
 import blake3
 import numpy as np
 
+from dynamo.common.utils import nvtx_utils as _nvtx
+
 logger = logging.getLogger(__name__)
 
 
@@ -18,7 +20,8 @@ def image_to_bytes(img: Any) -> bytes:
         return img
 
     if isinstance(img, Image.Image | np.ndarray):
-        return img.tobytes()
+        with _nvtx.annotate("mm:dynamo:uuid:to_bytes", color="red"):
+            return img.tobytes()
 
     raise TypeError(f"Unsupported image type for hashing: {type(img)}")
 
@@ -30,5 +33,6 @@ def compute_mm_uuids_from_images(images: Sequence[Any]) -> list[str]:
     uuids: list[str] = []
     for img in images:
         raw_bytes = image_to_bytes(img)
-        uuids.append(blake3.blake3(raw_bytes).hexdigest())
+        with _nvtx.annotate("mm:dynamo:uuid:blake3", color="yellow"):
+            uuids.append(blake3.blake3(raw_bytes).hexdigest())
     return uuids

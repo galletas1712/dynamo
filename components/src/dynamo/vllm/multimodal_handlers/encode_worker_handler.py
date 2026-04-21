@@ -154,6 +154,7 @@ class EncodeWorkerHandler:
 
         try:
             time_start = time.perf_counter()
+            cpu_start = time.thread_time_ns()
 
             with _nvtx.annotate("mm:enc:cache_check", color="cyan"):
                 # Before batch process images, check cache first
@@ -327,8 +328,14 @@ class EncodeWorkerHandler:
             logger.debug(f"Request: {request.model_dump_json()}")
 
             time_end = time.perf_counter()
+            cpu_end = time.thread_time_ns()
             self._accumulated_time += time_end - time_start
             self._processed_requests += 1
+            logger.info(
+                f"[encworker] req={request_id} "
+                f"wall_ms={(time_end - time_start) * 1000:.1f} "
+                f"cpu_ms={(cpu_end - cpu_start) / 1e6:.1f}"
+            )
             logger.debug(
                 f"received request {{ id: {request_id} }} at time {time_start:.4f}, processed in {time_end - time_start:.4f} seconds, break down: image loading and encoding time {(before_transfer_time - time_start):.4f} seconds, transfer preparation time {(after_transfer_time - before_transfer_time):.4f} seconds, after transfer time {(time_end - after_transfer_time):.4f} seconds."
             )
