@@ -285,8 +285,6 @@ impl<
             SequenceRequest {
                 request_id: request_id.clone(),
                 token_sequence: request.token_seq,
-                isl: request.isl_tokens,
-                overlap: selection.overlap_blocks,
                 track_prefill_tokens: request.track_prefill_tokens,
                 expected_output_tokens: request.expected_output_tokens,
                 prefill_load_hint,
@@ -315,24 +313,25 @@ impl<
             return None;
         }
 
-        let Some(estimator) = &self.prefill_load_estimator else {
-            return None;
+        let expected_prefill_duration = match &self.prefill_load_estimator {
+            Some(estimator) => match estimator.predict_prefill_duration(1, effective_isl, prefix) {
+                Ok(expected_prefill_duration) => Some(expected_prefill_duration),
+                Err(error) => {
+                    tracing::warn!(
+                        effective_isl,
+                        prefix,
+                        "failed to predict prefill duration for active load tracking: {error}"
+                    );
+                    None
+                }
+            },
+            None => None,
         };
 
-        match estimator.predict_prefill_duration(1, effective_isl, prefix) {
-            Ok(expected_prefill_duration) => Some(PrefillLoadHint {
-                initial_effective_prefill_tokens: effective_isl,
-                expected_prefill_duration: Some(expected_prefill_duration),
-            }),
-            Err(error) => {
-                tracing::warn!(
-                    effective_isl,
-                    prefix,
-                    "failed to predict prefill duration for active load tracking: {error}"
-                );
-                None
-            }
-        }
+        Some(PrefillLoadHint {
+            initial_effective_prefill_tokens: effective_isl,
+            expected_prefill_duration,
+        })
     }
 
     /// Number of requests currently parked in the pending queue (lock-free).
@@ -640,6 +639,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
+            shared_cache_hits: None,
             resp_tx: Some(tx),
         };
         (req, rx)
@@ -1031,6 +1031,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: Some(allowed),
+            shared_cache_hits: None,
             resp_tx: Some(tx),
         };
         queue.enqueue(req).await;
