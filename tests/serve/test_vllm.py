@@ -380,6 +380,14 @@ vllm_configs = {
             ),  # KV cache cap (2x safety over min=855_244_800)
             pytest.mark.timeout(220),  # ~5x observed 43.7s; 2B model loads slower on CI
             pytest.mark.post_merge,
+            # DYN-2863: Rust frontend's ImageLoader rejects MULTIMODAL_IMG_URL
+            # (http://localhost:<port>/...) because --frontend-decoding routes
+            # through the port-check at loader.rs:54. Re-enable once the CI
+            # image server is reachable without an explicit port, or
+            # allow_direct_port is plumbed through for test launches.
+            pytest.mark.skip(
+                reason="DYN-2863: 'Direct port access is not allowed' on localhost test image URL"
+            ),
         ],
         model="Qwen/Qwen2-VL-2B-Instruct",
         # Pass --frontend-decoding to enable Rust frontend image decoding + NIXL RDMA transfer
