@@ -1068,12 +1068,18 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 
 	_, err := r.GPUDiscovery.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache)
 	if err == nil {
-		// GPU discovery is available, validation passes
 		return nil
 	}
-	// Refine the logger message
+
+	// DCGM unavailable — try GFD node-label fallback if discovery is enabled.
 	reason := GetGPUDiscoveryFailureReason(err)
-	logger.Info("GPU discovery not available", "reason", reason, "error", err.Error())
+	logger.Info("DCGM discovery not available, trying GFD fallback", "reason", reason, "error", err.Error())
+	if ptr.Deref(r.Config.GPU.DiscoveryEnabled, true) {
+		if _, gfdErr := gpu.DiscoverGPUs(ctx, r.APIReader); gfdErr == nil {
+			return nil
+		}
+		logger.Info("GFD fallback also not available", "error", err.Error())
+	}
 	return fmt.Errorf("GPU hardware info required but auto-discovery failed. Add spec.hardware.gpuSku, spec.hardware.vramMb, spec.hardware.numGpusPerNode, spec.hardware.totalGpus")
 }
 
@@ -1451,8 +1457,18 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	gpuInfo, err := r.GPUDiscovery.DiscoverGPUsFromDCGMFiltered(ctx, r.APIReader, r.GPUDiscoveryCache, hw.GPUSKU)
 	if err != nil {
 		reason := GetGPUDiscoveryFailureReason(err)
-		logger.Info("GPU discovery not available", "reason", reason, "error", err.Error())
-		return fmt.Errorf("GPU hardware info required but auto-discovery failed. Add spec.hardware.gpuSku, spec.hardware.vramMb, spec.hardware.numGpusPerNode, spec.hardware.totalGpus")
+		logger.Info("DCGM discovery unavailable, trying node-label (GFD) fallback", "reason", reason, "error", err.Error())
+
+		// Fall back to node-label (GFD) discovery if GPU discovery is enabled
+		// (requires cluster-wide node read permissions via the gpu-discovery ClusterRole).
+		if !ptr.Deref(r.Config.GPU.DiscoveryEnabled, true) {
+			return fmt.Errorf("GPU hardware info required but auto-discovery failed (DCGM unavailable, GFD fallback disabled). Add spec.hardware.gpuSku, spec.hardware.vramMb, spec.hardware.numGpusPerNode, spec.hardware.totalGpus")
+		}
+		gpuInfo, err = gpu.DiscoverGPUsFiltered(ctx, r.APIReader, hw.GPUSKU)
+		if err != nil {
+			logger.Info("GFD fallback also failed", "error", err.Error())
+			return fmt.Errorf("GPU hardware info required but auto-discovery failed (DCGM and GFD node labels both unavailable). Add spec.hardware.gpuSku, spec.hardware.vramMb, spec.hardware.numGpusPerNode, spec.hardware.totalGpus")
+		}
 	}
 
 	logger.Info("GPU discovery completed successfully",

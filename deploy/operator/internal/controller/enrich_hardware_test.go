@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	gpupkg "github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"k8s.io/utils/ptr"
 )
@@ -43,6 +44,7 @@ func newFakeReconciler(objs ...client.Object) *DynamoGraphDeploymentRequestRecon
 		Client:    fakeClient,
 		APIReader: fakeClient,
 		Recorder:  &record.FakeRecorder{},
+		Config:    &configv1alpha1.OperatorConfiguration{},
 	}
 }
 
