@@ -360,6 +360,12 @@ def test_router_decisions_sglang_disagg(
     )
 
 
+# DYN-2784: Fixture setup hangs silently — worker #2 dies in SGLangProcess
+# launch and KvRouter blocks forever waiting for min_initial_workers=2.
+# pytest.mark.timeout(150) does not rescue (signal swallowed in fixture
+# C-level syscall). Jobs hit GitHub's 6h runner cap. Remove once DYN-2784
+# lands a real fix.
+@pytest.mark.skip(reason="DYN-2784: hangs in fixture setup; see linked ticket")
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.parametrize(
