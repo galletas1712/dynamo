@@ -751,7 +751,7 @@ func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSK
 		info *GPUInfo
 		sku  nvidiacomv1beta1.GPUSKUType
 	}
-	var allNodes []nodeInfo
+	allNodes := make([]nodeInfo, 0, len(nodeList.Items))
 	for i := range nodeList.Items {
 		node := &nodeList.Items[i]
 		gpuInfo, err := extractGPUInfoFromNode(node)
